@@ -1,1 +1,1 @@
-# Sn-smeltesystem
+# Snøsmeltesystem
