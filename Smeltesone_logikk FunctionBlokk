@@ -1,0 +1,190 @@
+FUNCTION_BLOCK pumpe_ventil
+VAR_INPUT
+	
+	antall_soner        : INT;	//Hvor mange soner du ønsker å regulere
+    bakke_temp          : ARRAY[1..20] OF REAL;	//Array av alle bakke temp målinger
+    bakke_fukt          : ARRAY[1..20] OF REAL;	//Array av alle bakke fukt målinger
+	
+    frost_grense        : REAL;	//Nedre grense for å starte tining
+    smelte_grense       : REAL;	//Øvre grense for å starte tining
+    fukt_grense         : REAL;	//Grense for hvor mye fukt for å starte tining
+    hysterese           : REAL;	//Ekstra ledd for å forhindre hopping mellom tilstander
+	
+	min_temp_grense     : REAL;	//Under denne tempen vil systemet gå i lockout
+    min_temp_aktiv      : BOOL; //Velg om du vil inkludere lockout
+	
+	Kp_pmp              : REAL;	//Kp-verdi for pumpe
+    Tn_pmp              : REAL;	//Tn-verdi for pumpe
+    Tv_pmp              : REAL;	//Tv-verdi for pumpe
+	Kp_vnt              : REAL;	//Kp-verdi for ventil
+    Tn_vnt              : REAL;	//Tn-verdi for ventil
+    Tv_vnt              : REAL;	//Tv-verdi for ventil
+    manuell             : BOOL;	//Array av valg der bruker bestemer om sonen skal være i manuell modus
+    reset               : ARRAY[1..20] OF BOOL;	//Reset for integral delen av regulatorer for hver sone
+
+	bestemt_pumpe       : REAL;	//Verdi pumpen går til når den er i manuell modus
+    min_pumpe           : REAL;	//Minimum pumpe verdi
+    max_pumpe           : REAL;	//Maximimum pumpe verdi
+    pumpe_sone          : INT;	//Sone som skal reguleres av pumpen
+
+	bestemt_aapning     : ARRAY[1..20] OF REAL;	//Verdi ventilen i hver sone går til når den er i manuell modus
+	ventil_min          : ARRAY[1..20] OF REAL;	//Minimum ventil verdi
+	ventil_maks         : ARRAY[1..20] OF REAL;	//Maximum ventil verdi
+
+END_VAR
+VAR_OUTPUT
+	standby             : ARRAY[1..20] OF BOOL;	//På når sonen er i standby modus
+	running             : ARRAY[1..20] OF BOOL;	//På når sonen er i running modus
+	ventil_cmd          : ARRAY[1..20] OF REAL;	//Signal som bestemmer ventil sin åpning
+	pumpe_cmd           : REAL;	//Signal som bestemmer pumpe sin hastighet i prosent
+	min_temp_lockout    : ARRAY[1..20] OF BOOL; //På når sonen er i lockout modus
+
+END_VAR
+VAR
+	i					: INT;
+    sone_case			: ARRAY[1..20] OF INT:= [20(0)]; // 0=AV 1=STANDBY 2=RUNNING 3=LOCKOUT
+    pid_ventil          : ARRAY[1..20] OF PID;
+    pid_pumpe           : PID;
+    Lockout            	: ARRAY[1..20] OF BOOL;
+	offset_pmp          : REAL := 0;	//Offset-verdi for pumpe
+    offset_vnt          : REAL := 0; //Offset-verdi for ventil
+END_VAR
+
+FOR i := 1 TO antall_soner DO
+
+
+ Lockout[i] := min_temp_aktiv AND (bakke_temp[i] < min_temp_grense) AND NOT manuell;
+ 
+	IF Lockout[i] THEN 
+        sone_case[i] := 3;
+    ELSIF sone_case[i] = 3 THEN
+        // Gå kun ut av lockout hvis temp er over min temp grense + en hysterese
+        IF NOT min_temp_aktiv OR bakke_temp[i] >= (min_temp_grense + hysterese) THEN
+            sone_case[i] := 0; // send tilbake til state maskinen for videre valg
+        END_IF
+    END_IF;
+
+    // Kjører kun hvis sonen ikke er i lockout
+   	IF sone_case[i] <> 3 THEN
+
+        CASE sone_case[i] OF
+
+            0: // AV
+                IF bakke_temp[i] <= frost_grense THEN
+                    sone_case[i] := 1;
+                END_IF
+
+            1: // STANDBY
+                IF bakke_fukt[i] > fukt_grense AND bakke_temp[i] <= smelte_grense THEN
+					reset[i] := TRUE;
+					reset[i] := FALSE;
+                    sone_case[i] := 2;
+                ELSIF bakke_temp[i] > (frost_grense + hysterese) THEN
+					reset[i] := TRUE;
+					reset[i] := FALSE;
+                    sone_case[i] := 0;
+                END_IF
+
+            2: // RUNNING
+			
+                IF bakke_fukt[i] <= (fukt_grense + hysterese) OR bakke_temp[i] > (smelte_grense + hysterese)THEN
+					reset[i] := TRUE;
+					reset[i] := FALSE;
+                    sone_case[i] := 1;
+                END_IF
+
+        END_CASE;
+	
+	END_IF;
+
+    // Gir bruker info om hvilken modus sonen er i
+    standby[i]          := (sone_case[i] = 1);
+    running[i]          := (sone_case[i] = 2);
+    min_temp_lockout[i] := (sone_case[i] = 3);
+
+	
+	//Bestemmer ventil og pumpe signal basert på hvilken modus sonen er i
+    CASE sone_case[i] OF
+
+        0: // OFF
+            ventil_cmd[i] := 0;
+			//fjern denne PIDen?
+            pid_ventil[i](
+                ACTUAL      := bakke_temp[i],
+                SET_POINT   := 0,
+                KP:= Kp_vnt, TN:= Tn_vnt, TV:= Tv_vnt,
+                Y_MANUAL    := 0,
+                Y_OFFSET    := 0,
+                Y_MIN       := ventil_min[i],
+                Y_MAX       := ventil_maks[i],
+                MANUAL      := TRUE,
+                RESET       := TRUE);
+
+        1: // STANDBY
+            pid_ventil[i](
+                ACTUAL      := bakke_temp[i],
+                SET_POINT   := (frost_grense + hysterese),
+                KP:= Kp_vnt, TN:= Tn_vnt, TV:= Tv_vnt,
+                Y_MANUAL    := bestemt_aapning[i],
+                Y_OFFSET    := offset_vnt,
+                Y_MIN       := ventil_min[i],
+                Y_MAX       := ventil_maks[i],
+                MANUAL      := manuell,
+                RESET       := reset[i]);
+            ventil_cmd[i] := pid_ventil[i].Y;
+
+        2: // RUNNING
+            IF i = pumpe_sone THEN
+                ventil_cmd[i] := ventil_maks[i];
+                pid_pumpe(
+                    ACTUAL      := bakke_temp[i],
+                    SET_POINT   := (smelte_grense + hysterese),
+                    KP:= Kp_pmp, TN:= Tn_pmp, TV:= Tv_pmp,
+                    Y_MANUAL    := bestemt_pumpe,
+                    Y_OFFSET    := offset_pmp,
+                    Y_MIN       := min_pumpe,
+                    Y_MAX       := max_pumpe,
+                    MANUAL      := manuell,
+                    RESET       := reset[i]);
+                pumpe_cmd := pid_pumpe.Y;
+            ELSE
+                pid_ventil[i](
+                    ACTUAL      := bakke_temp[i],
+                    SET_POINT   := (smelte_grense + hysterese),
+                    KP:= Kp_vnt, TN:= Tn_vnt, TV:= Tv_vnt,
+                    Y_MANUAL    := bestemt_aapning[i],
+                    Y_OFFSET    := offset_vnt,
+                    Y_MIN       := ventil_min[i],
+                    Y_MAX       := ventil_maks[i],
+                    MANUAL      := manuell,
+                    RESET       := reset[i]);
+                ventil_cmd[i] := pid_ventil[i].Y;
+            END_IF
+
+        3: // LOCKOUT - Fungerer som av, reset alt
+            ventil_cmd[i] := 0;
+			//fjern PIDen?
+            pid_ventil[i](
+                ACTUAL      := bakke_temp[i],
+                SET_POINT   := 0,
+                KP:= Kp_vnt, TN:= Tn_vnt, TV:= Tv_vnt,
+                Y_MANUAL    := 0,
+                Y_OFFSET    := 0,
+                Y_MIN       := ventil_min[i],
+                Y_MAX       := ventil_maks[i],
+                MANUAL      := TRUE,
+                RESET       := TRUE);
+
+    END_CASE;
+
+END_FOR;
+i:=1;
+
+// Bestemmer Pumpe signal når pumpe sone er i standby og når det ikke er noen pumpe sone
+IF pumpe_sone < 1 OR pumpe_sone > antall_soner THEN
+    pumpe_cmd := 0;
+ELSIF sone_case[pumpe_sone] = 0 THEN
+    pumpe_cmd := 0;
+ELSIF sone_case[pumpe_sone] = 1 OR sone_case[pumpe_sone] = 3 THEN //Vil dette funke? Setter pumpen til minimum når pumpe sonen enten er i lockout eller standby
+    pumpe_cmd := min_pumpe;
+END_IF;
