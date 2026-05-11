@@ -1,0 +1,30 @@
+FUNCTION_BLOCK FB_Belimo_Energy_Valve
+VAR_INPUT
+	HoldingRegs : ARRAY[0..99] OF WORD; // map til Modbus Holding Registers
+END_VAR
+VAR_OUTPUT
+	RelPos_pct : REAL;
+    Flow_lps : REAL;
+    Temp1_C : REAL;
+    Temp2_C : REAL;
+    DeltaT_K : REAL;
+    Energy_kWh : REAL;
+END_VAR
+VAR
+	rawLow : WORD;
+    rawHigh : WORD;
+    raw32 : DWORD;
+END_VAR
+
+------------------------------------------------------------------------End of declaration------------------------------------------------------------------------
+
+//Konvertering
+RelPos_pct := TO_REAL(HoldingRegs[4]) * 0.01;
+
+Flow_lps := TO_REAL(HoldingRegs[7]) * 0.001;
+
+Temp1_C := TO_REAL(HoldingRegs[19]) * 0.01; //vi sier at dette er tur temp for enkelhet, kunne ha vært invertert
+
+Temp2_C := TO_REAL(HoldingRegs[21]) * 0.01;// retur temp
+
+DeltaT_K := TO_REAL(HoldingRegs[23]) * 0.01;// diff mellom tur og retur 
