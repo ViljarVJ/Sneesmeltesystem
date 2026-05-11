@@ -1,0 +1,291 @@
+PROGRAM PLC_PRG
+VAR RETAIN
+	
+
+	EnergiVentilRegs: ARRAY[0..99] OF WORD;
+	PumpeRegs: ARRAY[0..99] OF WORD;
+	
+	//prognose 
+	fbWeather		: OPW.ForecastWeather;
+	fbWeatherBatch	: OPW.ForecastWeatherBatch;
+
+    xExecute		: BOOL;
+    xError			: opw.ERROR;
+	xDone			: BOOL;
+	xbusy			: BOOL;
+	location		: OPW.GeoLocation := (
+		ws_city		:= "Tomsø",
+		ws_country_code	:= "no",
+		s_latitude	:= '69.6489',
+		s_longitude	:= '18.9551'
+	);
+	eUnits			: OPW.UNIT_OPTION := OPW.UNIT_OPTION.METRIC;
+	sLangugeCode	: OPW.LANGUAGE_CODE := 'en';
+	
+    apiKey			: STRING := '622d42f5e83be24b2235ae08787d5a43';
+
+    idx				: INT;
+		
+	tFetch			: TON;
+	
+	prognose_temp				: ARRAY[0..23] OF REAL;
+	prognose_nedbor				: ARRAY[0..23] OF REAL;
+	prognose_vind				: ARRAY[0..23] OF REAL;
+	
+	// FBs
+	Belimovalve : FB_Belimo_Energy_Valve;
+	ventil0_regulering: safety_maks;
+	smelte_regulering: pumpe_ventil;
+	prognose_regulering: prognose;
+	
+	//styres av bruker
+	veksler_temp_grense			: REAL:= 5;
+	temp_beskyttelse_omraade	: REAL:= 5;
+	min_temp_grense				: REAL:= -5;
+	hysterese_C					: REAL:=1.5;
+	smelte_grense				: REAL:=1.5;
+	frost_grense				: REAL:=3;
+	energi_grense				: REAL:=40;
+	fukt_grense					: REAL:=40;
+	
+	Kp_array : ARRAY [0..2] OF REAL := [5,5,5]; // 0 = ventil0, 1 = pmp, 2 = ventiler
+	Ti_array : ARRAY [0..2] OF REAL := [10,100,100];
+	Td_array : ARRAY [0..2] OF REAL := [0,0,0];
+	
+	antall_soner				: INT:=3;
+	bestemt_pumpe				: REAL:=50;
+	min_pumpe					: REAL:=0;
+	max_pumpe					: REAL:=100;
+	bestemt_aapning				: ARRAY[1..20] OF REAL:= [20(0)];
+	bestemt0_aapning			: REAL:= 0;
+	
+	ventil_min					: ARRAY[1..20] OF REAL:= [20(0)];
+	ventil_maks					: ARRAY[1..20] OF REAL:= [20(100)];
+	
+	ventil0_min					: REAL:= 0;
+	ventil0_maks				: REAL:= 100;
+	
+	manuell						: BOOL := FALSE;
+	manuell0					: BOOL:= FALSE;
+	reset						: ARRAY[1..20] OF BOOL:= [20(FALSE)];
+	reset0						: BOOL:= FALSE;
+	min_temp_aktiv				: BOOL:= TRUE;
+	predikt						: BOOL:= FALSE;
+	forvarme_horisont           : REAL:= 6.0;
+	
+	//interne variabler
+	i							: INT := 0;
+	pumpe_sone					: INT;
+	varme_tap					: REAL;
+	flow_sone					: REAL;
+	tur_sone					: REAL;
+	//Simulering (tall er kun eksempler)
+	C1							: REAL:= 50000.0; // J/K
+	C2							: REAL:= 80000.0; // J/K
+	rho							: REAL:= 1000.0;  // kg/m^3
+	c_1							: REAL:= 4186.0;  // J/(kg*K)
+	
+	Tx							: REAL:= 80;	  // C
+	
+	G1							: REAL:= 2000.0;  // W/K
+	G2							: REAL:= 500.0;   // W/K
+	G3							: REAL:= 300.0;   // W/K
+	
+	x5							: REAL:= 55;
+	
+	v1 							: REAL:= -5.0;
+    v2 							: REAL:= 10.0;
+    v3 							: REAL:= 10.0;
+    v4 							: REAL:= 10.0;
+	
+	dx1							: REAL;
+	dx2							: REAL;
+	dx3							: REAL;
+	dx4							: REAL;
+	dx5							: REAL;
+	deltat						: REAL:= 0.1;	  // s
+
+	//output
+	standby						: ARRAY[1..20] OF BOOL:= [20(FALSE)];
+	running						: ARRAY[1..20] OF BOOL:= [20(FALSE)];
+	lockout						: ARRAY[1..20] OF BOOL:= [20(FALSE)];
+	tilstand                    : ARRAY[1..20] OF STRING;
+	ventil0_aapning_cmd			: REAL;
+	ventil_aapning_cmd			: ARRAY[1..20] OF REAL;
+	pumpe_hastighet_cmd			: REAL;
+
+
+	//innput
+	tur_temp					: REAL;
+	retur_temp					: REAL;
+	retur_temp2					: REAL;
+	ute_temp					: REAL := -10;
+	energi_forbruk				: REAL;
+	bakke_temp 					: ARRAY[1..20] OF REAL:= [20(5)];
+    bakke_fukt 					: ARRAY[1..20] OF REAL:= [20(0)];
+	ventil0_aapning_rd			: REAL;
+	ventil_aapning_rd			: ARRAY[1..20] OF REAL;
+	pumpe_hastighet_rd			: REAL;	
+	
+END_VAR
+
+
+//init
+CASE GVL.energiventil_type OF
+0: Belimovalve(HoldingRegs := EnergiVentilRegs);
+tur_temp := Belimovalve.temp1_C;
+retur_temp := Belimovalve.temp2_C;
+END_CASE
+
+fbWeather(
+    xExecute := xExecute,
+	sApiKey := apiKey,
+	pGeoLocation := ADR(location),
+	eUnits := eUnits,
+	data := fbWeatherBatch);
+	
+xError:= fbWeather.eError;
+xDone:= fbWeather.xDone;
+xbusy:= fbWeather.xBusy;
+
+IF fbWeather.xDone THEN
+
+    FOR i := 0 TO 23 DO
+
+        prognose_temp[i] := fbWeatherBatch.aHourlyData[i].r_temperature;
+        prognose_nedbor[i] := fbWeatherBatch.aHourlyData[i].r_snow_last_hour;
+        prognose_vind[i] := fbWeatherBatch.aHourlyData[i].r_wind_speed;
+
+    END_FOR
+	
+	xExecute := FALSE;
+
+END_IF
+
+tFetch(IN := TRUE, PT := T#60M);
+
+IF tFetch.Q THEN
+    xExecute := TRUE;
+    tFetch(IN := FALSE);
+END_IF
+
+prognose_regulering(
+    prognose_temp       := prognose_temp,
+    prognose_nedbor     := prognose_nedbor,
+    prognose_vind       := prognose_vind,
+    ute_temp_na         := ute_temp,
+    bakke_temp          := bakke_temp,
+
+    base_frost_grense   := frost_grense,
+	base_fukt_grense	:= fukt_grense,
+    base_smelte_grense  := smelte_grense,
+    base_min_pumpe      := min_pumpe,
+    base_max_pumpe      := max_pumpe,
+
+    forvarme_horisont   := forvarme_horisont,		// Se 6 timer frem
+    maks_onsket_temp_okning := 3.0,		// Hev setpunkt med x antall grader
+    grense_endring         := 2.0,		// Senk grensen med x antall grader
+    min_pumpe_okning     := 15.0,	// Øk pumpe hastigheten for at hver sone alltid får nok strøm
+	aktiver_prediktiv	:= predikt);
+
+
+
+ventil0_regulering(
+	retur_temp:= retur_temp,
+	temp_grense:= veksler_temp_grense,
+	temp_beskyttelse_omraade:= temp_beskyttelse_omraade,
+	forbruk:= energi_forbruk,
+	forbruk_grense:= energi_grense,
+	bestemt_ventil:= bestemt0_aapning,
+	Kp:= Kp_array[0],
+	Ti:= Ti_array[0],
+	Td:= Td_array[0],
+	min_ventil:= ventil0_min,
+	max_ventil:= ventil0_maks,
+	manuell:= manuell0,
+	reset:= reset0);
+
+	
+ventil0_aapning_cmd:= ventil0_regulering.ventil;
+
+
+FOR i := 1 TO antall_soner DO
+    IF smelte_regulering.running[i] THEN
+        pumpe_sone := i;
+    END_IF
+END_FOR
+i:=0;
+
+smelte_regulering(
+	antall_soner:= antall_soner,
+	bakke_temp:=bakke_temp,
+	bakke_fukt:= bakke_fukt,
+	frost_grense:= frost_grense,
+	smelte_grense:= smelte_grense,
+	fukt_grense:= fukt_grense,
+	hysterese:= hysterese_C,
+	min_temp_grense:= min_temp_grense,
+	min_temp_aktiv:= min_temp_aktiv,
+	Kp_pmp:= Kp_array[1],
+	Tn_pmp:= Ti_array[1],
+	Tv_pmp:= Td_array[1],
+	Kp_vnt:= Kp_array[2],
+	Tn_vnt:= Ti_array[2],
+	Tv_vnt:= Td_array[2],
+	manuell:= manuell,
+	reset:= reset,
+	bestemt_pumpe:= bestemt_pumpe,
+	min_pumpe:= min_pumpe,
+	max_pumpe:= max_pumpe,
+	pumpe_sone:= pumpe_sone,
+	bestemt_aapning:=bestemt_aapning,
+	ventil_min:= ventil_min,
+	ventil_maks:= ventil_maks);
+
+standby:= smelte_regulering.standby;
+running:= smelte_regulering.running;
+lockout:= smelte_regulering.min_temp_lockout;
+ventil_aapning_cmd:= smelte_regulering.ventil_cmd;
+pumpe_hastighet_cmd:= smelte_regulering.pumpe_cmd;
+
+
+FOR i := 1 TO antall_soner DO
+	IF standby[i] THEN 
+		tilstand[i] := 'i standby';
+	ELSIF running[i] THEN 
+		tilstand[i] := 'i running';
+	ELSIF lockout[i] THEN 
+		tilstand[i] := 'i lockout';
+	ELSE
+		tilstand[i] := 'av';
+	END_IF
+END_FOR
+
+//simulering
+	retur_temp:= ((1.0/ventil0_aapning_rd - 1.0) * tur_temp 
+	+ ventil_aapning_rd[1] * v2 + ventil_aapning_rd[2] * ventil_aapning_rd[2] * v3 
+	+ (1.0 - ventil_aapning_rd[1] - ventil_aapning_rd[1] * ventil_aapning_rd[2]) * v4);
+	
+	
+dx1 := (1.0/C1) * ( pumpe_hastighet_rd * rho * c_1 * ( Tx - tur_temp) - G1 * (tur_temp - x5));
+
+dx2 := (1.0/C2) * ( pumpe_hastighet_rd * ventil0_aapning_rd * ventil_aapning_rd[1] * rho * c_1 * (tur_temp - v2) + G2 * (v2 - bakke_temp[1]) - G3 * (bakke_temp[1] - ute_temp));
+
+dx3 := (1.0/C2) * ( pumpe_hastighet_rd * ventil0_aapning_rd * ventil_aapning_rd[1] * ventil_aapning_rd[2] * rho * c_1 * (tur_temp - v3) + G2 * (v3 - bakke_temp[2]) - G3 * (bakke_temp[2] - ute_temp));
+
+dx4 := (1.0/C2) * ( pumpe_hastighet_rd * ventil0_aapning_rd * (1.0 - ventil_aapning_rd[1] - ventil_aapning_rd[1]*ventil_aapning_rd[2]) * rho * c_1 * (tur_temp - v4) + G2 * (v4 - bakke_temp[3]) - G3 * (bakke_temp[3] - ute_temp));
+
+dx5 := (1.0/C1) * ( pumpe_hastighet_rd * rho * c_1 * (retur_temp- x5) - G1 * (x5 - tur_temp));
+
+//Numerisk integrasjon (Euler)
+tur_temp := tur_temp + dx1 * deltat;
+bakke_temp[1] := bakke_temp[1] + dx2 * deltat;
+bakke_temp[2] := bakke_temp[2] + dx3 * deltat;
+bakke_temp[3] := bakke_temp[3] + dx4 * deltat;
+x5 := x5 + dx5 * deltat;
+
+//Enkel beregning av temperaturen ut av hver sone
+v2 := tur_temp - (tur_temp - bakke_temp[1]* pumpe_hastighet_rd * ventil0_aapning_rd * ventil_aapning_rd[1]);
+v3 := tur_temp - (tur_temp - bakke_temp[1]* pumpe_hastighet_rd * ventil0_aapning_rd * ventil_aapning_rd[1] * ventil_aapning_rd[2]);
+v4 := tur_temp - (tur_temp - bakke_temp[1]* pumpe_hastighet_rd * ventil0_aapning_rd * (1.0 - ventil_aapning_rd[1] - ventil_aapning_rd[1]*ventil_aapning_rd[2]));
+
