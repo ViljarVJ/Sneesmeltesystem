@@ -1,0 +1,68 @@
+FUNCTION_BLOCK safety_maks
+VAR_INPUT
+	retur_temp                  : REAL;  // Retur temperatur sensor rett før varmeveksler og etter treveis ventil
+    temp_grense                 : REAL;  // Temperatur hvor man må begynne å ta hensyn til sikkerheten rundt varmevekslere
+    temp_beskyttelse_omraade    : REAL;  // Området under tem_grense for helt stengt ventil
+                                         // Ved temp_grense - temp_beskyttelse_omraade blir ventil = 100%
+
+    forbruk                     : REAL;  // Nåverende energi forbruk (kW)
+    forbruk_grense              : REAL;  // Maks tillat energi forbruk (kW)
+
+    bestemt_ventil              : REAL;  // Hvor stor åpning ventilen har i manuell modus
+    Kp                          : REAL;  
+    Ti                          : REAL;
+    Td                          : REAL;
+    min_ventil                  : REAL; // Når ventilen går fullt til smelte soner
+    max_ventil                  : REAL; // Når ventilen går fullt tilbake til varmeveklser
+    manuell                     : BOOL;
+    reset                       : BOOL;
+END_VAR
+VAR_OUTPUT
+    ventil                      : REAL;	// Signal som bestemmer ventil possisjon
+    beskyttelse_aktiv           : BOOL; // På når beskyttelse modus er aktiv
+    beskyttelse_faktor          : REAL; // Faktor som sier hvor mye beskytelsen er på (0.0 beskyttelsen er av, 1.0 beskyttelsen sender alt tilbake til varmeveksler
+END_VAR
+VAR
+	offset                      : REAL := 0;
+    pid                         : PID;
+    Max_tillatt                : REAL;  // Min valve position allowed by protection
+END_VAR
+
+// BESKYTT MOT DÅRLIG INNGANG
+// Forhindrer divisjon med null hvis område ikke er konfigurert
+IF temp_beskyttelse_omraade <= 0.0 THEN
+    temp_beskyttelse_omraade := 1.0;
+END_IF
+
+//bestemmer hvor mye beskyttelse som skla være på
+IF retur_temp >= temp_grense THEN
+    beskyttelse_faktor := 0.0;
+ELSIF retur_temp <= (temp_grense - temp_beskyttelse_omraade) THEN
+    beskyttelse_faktor := 1.0;
+ELSE
+    beskyttelse_faktor := (temp_grense - retur_temp) / temp_beskyttelse_omraade;
+END_IF;
+
+//setter beskytelses indikator på hvis det er mer enn 0.0 beskytelse
+beskyttelse_aktiv := beskyttelse_faktor > 0.0;
+
+//definerer en minimums grense tillat slik at pid-regulatoren ikke kan sende mer til smelte soner enn trygt
+Max_tillatt := max_ventil - (beskyttelse_faktor * (max_ventil - min_ventil));
+
+//pid for å regulere energi forbruk
+pid(
+    ACTUAL      := forbruk,
+    SET_POINT   := forbruk_grense,
+    KP          := Kp,
+    TN          := Ti,
+    TV          := Td,
+    Y_MANUAL    := bestemt_ventil,
+    Y_OFFSET    := offset,
+    Y_MIN       := min_ventil,
+    Y_MAX       := max_tillatt,
+    MANUAL      := manuell,
+    RESET       := reset);
+
+ventil := LIMIT(Min_ventil, pid.Y, max_tillatt);
+
+//når ventil er 100% går all strøm til smelte sonene og når ventil er 0% vil alø strøm gå igjennom tre veis ventilen og tilbake til varmeveksleren
